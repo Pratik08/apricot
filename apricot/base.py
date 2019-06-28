@@ -1,5 +1,5 @@
 # base.py
-# Author: Jacob Schreiber <jmschreiber91@gmail.com> 
+# Author: Jacob Schreiber <jmschreiber91@gmail.com>
 
 """
 This file contains code that implements the core of the submodular selection
@@ -36,7 +36,7 @@ class SubmodularSelection(object):
 	initial_subset : list, numpy.ndarray or None
 		If provided, this should be a list of indices into the data matrix
 		to use as the initial subset, or a group of examples that may not be
-		in the provided data should beused as the initial subset. If indices, 
+		in the provided data should beused as the initial subset. If indices,
 		the provided array should be one-dimensional. If a group of examples,
 		the data should be 2 dimensional.
 
@@ -78,7 +78,7 @@ class SubmodularSelection(object):
 		if n_greedy_samples > n_samples:
 			raise ValueError("n_samples must be larger than n_greedy_samples")
 
-		if not isinstance(initial_subset, (list, numpy.ndarray)) and initial_subset is not None: 
+		if not isinstance(initial_subset, (list, numpy.ndarray)) and initial_subset is not None:
 			raise ValueError("initial_subset must be a list, numpy array, or None")
 		if isinstance(initial_subset, (list, numpy.ndarray)):
 			initial_subset = numpy.array(initial_subset)
@@ -93,7 +93,7 @@ class SubmodularSelection(object):
 		self.gains = None
 		self.sparse = None
 		self.initial_subset = initial_subset
-	
+
 	def fit(self, X, y=None):
 		"""Fit a ranking to the data set of the top n_sample elements.
 
@@ -146,7 +146,7 @@ class SubmodularSelection(object):
 			if self.initial_subset.ndim == 1:
 				if self.initial_subset.dtype == bool:
 					self.initial_subset = numpy.where(self.initial_subset == 1)[0]
-				
+
 				if len(self.initial_subset) + self.n_samples > X.shape[0]:
 					raise ValueError("When using a mask for the initial subset" \
 						" must selected fewer than the size of the subset minus" \
@@ -159,7 +159,7 @@ class SubmodularSelection(object):
 				elif self.initial_subset.min() < 0:
 					raise ValueError("When passing in an integer mask for the initial subset"\
 						" the minimum value cannot be negative.")
-				
+
 				self.mask[self.initial_subset] = 1
 
 			self._initialize_with_subset(X)
@@ -169,20 +169,22 @@ class SubmodularSelection(object):
 
 		# Select using the greedy algorithm first returning the gains from
 		# the last round of selection.
-		gains = self._greedy_select(X)
+		# gains = self._greedy_select(X)
+		gains = self._greedy_select_precompute_stats(X)
 
 		# Populate the priority queue following greedy selection
 		if self.n_greedy_samples < self.n_samples:
 			for idx, gain in enumerate(gains):
 				if self.mask[idx] != 1:
-					self.pq.add(idx, -gain) 
+					self.pq.add(idx, -gain)
 
 			# Now select remaining elements using the lazy greedy algorithm.
-			self._lazy_greedy_select(X)
+			# self._lazy_greedy_select(X)
+			self._lazy_greedy_select_precompute_stats(X)
 
 		if self.verbose == True:
 			self.pbar.close()
-		
+
 		self.ranking = numpy.array(self.ranking)
 		return self
 

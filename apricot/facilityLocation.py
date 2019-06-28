@@ -27,7 +27,6 @@ def select_next(X, gains, current_values, mask):
 
 		a = numpy.maximum(X[idx], current_values)
 		gains[idx] = (a - current_values).sum()
-
 	return numpy.argmax(gains)
 
 @njit(sdtypes, nogil=True, parallel=True)
@@ -47,11 +46,29 @@ def select_next_sparse(X_data, X_indices, X_indptr, gains, current_values, mask)
 
 	return numpy.argmax(gains)
 
+def update_statistics_add(X, precompute_stats, item_idx):
+	for idx in range(X.shape[0]):
+		if (X[idx][item_idx] > precompute_stats[idx]):
+			precompute_stats[X.shape[0] + idx] = precompute_stats[idx]
+			precompute_stats[idx] = X[idx][item_idx]
+		elif (X[idx][item_idx] > precompute_stats[X.shape[0] + idx]):
+			precompute_stats[X.shape[0] + idx] = X[idx][item_idx]
+
+# @njit(dtypes, nogil=True, parallel=True)
+def select_next_precompute_stats(X, gains, precompute_stats, mask):
+	for idx in range(X.shape[0]):
+		if mask[idx] == 1:
+			continue
+
+		a = numpy.maximum(precompute_stats[:X.shape[0]], X[idx])
+		gains[idx] = (a - precompute_stats[:X.shape[0]]).sum()
+	return numpy.argmax(gains)
+
 
 class FacilityLocationSelection(SubmodularSelection):
 	"""A facility location submodular selection algorithm.
 
-	NOTE: All ~pairwise~ values in your data must be positive for this 
+	NOTE: All ~pairwise~ values in your data must be positive for this
 	selection to work.
 
 	This function uses a facility location based submodular selection algorithm
@@ -90,7 +107,7 @@ class FacilityLocationSelection(SubmodularSelection):
 	initial_subset : list, numpy.ndarray or None
 		If provided, this should be a list of indices into the data matrix
 		to use as the initial subset, or a group of examples that may not be
-		in the provided data should beused as the initial subset. If indices, 
+		in the provided data should beused as the initial subset. If indices,
 		the provided array should be one-dimensional. If a group of examples,
 		the data should be 2 dimensional.
 
@@ -116,10 +133,11 @@ class FacilityLocationSelection(SubmodularSelection):
 		sample, and so forth.
 	"""
 
-	def __init__(self, n_samples=10, pairwise_func='euclidean', n_greedy_samples=1, 
+	def __init__(self, n_samples=10, pairwise_func='euclidean', n_greedy_samples=1,
 		initial_subset=None, verbose=False):
 		self.pairwise_func_name = pairwise_func
-		
+		self.precompute_stats = numpy.zeros(n_samples * 2, dtype='float64')
+
 		norm = lambda x: numpy.sqrt((x*x).sum(axis=1)).reshape(x.shape[0], 1)
 		norm2 = lambda x: (x*x).sum(axis=1).reshape(x.shape[0], 1)
 
@@ -137,7 +155,7 @@ class FacilityLocationSelection(SubmodularSelection):
 			raise KeyError("Must be one of 'euclidean', 'corr', 'cosine', 'precomputed'" \
 				" or a custom function.")
 
-		super(FacilityLocationSelection, self).__init__(n_samples, 
+		super(FacilityLocationSelection, self).__init__(n_samples,
 			n_greedy_samples, initial_subset, verbose)
 
 	def fit(self, X, y=None):
@@ -166,6 +184,7 @@ class FacilityLocationSelection(SubmodularSelection):
 		"""
 
 		f = self.pairwise_func
+		self.precompute_stats = numpy.zeros(X.shape[0] * 2, dtype='float64')
 
 		if isinstance(X, csr_matrix) and f != "precomputed":
 			raise ValueError("Must passed in a precomputed sparse " \
@@ -190,6 +209,7 @@ class FacilityLocationSelection(SubmodularSelection):
 				eps = numpy.max(numpy.diag(X_pairwise))
 				X_pairwise -= numpy.eye(X.shape[0]) * eps
 
+		self.precompute_stats += numpy.min(X_pairwise)
 		return super(FacilityLocationSelection, self).fit(X_pairwise, y)
 
 	def _initialize_with_subset(self, X_pairwise):
@@ -218,7 +238,7 @@ class FacilityLocationSelection(SubmodularSelection):
 			if not self.sparse:
 				best_idx = select_next(X_pairwise, gains, self.current_values,
 					self.mask)
-				self.current_values = numpy.maximum(X_pairwise[best_idx], 
+				self.current_values = numpy.maximum(X_pairwise[best_idx],
 					self.current_values)
 			else:
 				best_idx = select_next_sparse(X_pairwise.data,
@@ -242,18 +262,18 @@ class FacilityLocationSelection(SubmodularSelection):
 		for i in range(self.n_greedy_samples, self.n_samples):
 			best_gain = 0.
 			best_idx = None
-			
+
 			while True:
 				prev_gain, idx = self.pq.pop()
 				prev_gain = -prev_gain
-				
+
 				if best_gain >= prev_gain:
 					self.pq.add(idx, -prev_gain)
 					self.pq.remove(best_idx)
 					break
-				
+
 				if not self.sparse:
-					a = numpy.maximum(X_pairwise[:, idx], 
+					a = numpy.maximum(X_pairwise[:, idx],
 						self.current_values)
 
 					gain = (a - self.current_values).sum()
@@ -266,11 +286,11 @@ class FacilityLocationSelection(SubmodularSelection):
 						j = X_pairwise.indices[k]
 
 						if X_pairwise.data[k] > self.current_values[j]:
-							gain += (X_pairwise.data[k] - 
+							gain += (X_pairwise.data[k] -
 								self.current_values[j])
 
 				self.pq.add(idx, -gain)
-				
+
 				if gain > best_gain:
 					best_gain = gain
 					best_idx = idx
@@ -288,9 +308,66 @@ class FacilityLocationSelection(SubmodularSelection):
 
 				for k in range(start, end):
 					j = X_pairwise.indices[k]
-					self.current_values[j] = max(X_pairwise.data[k], 
+					self.current_values[j] = max(X_pairwise.data[k],
 						self.current_values[j])
 
 			if self.verbose == True:
 				self.pbar.update(1)
 
+	def _greedy_select_precompute_stats(self, X_pairwise):
+		"""Select elements in a naive greedy manner."""
+
+		for i in range(self.n_greedy_samples):
+			gains = numpy.zeros(X_pairwise.shape[0], dtype='float64')
+
+			if not self.sparse:
+				best_idx = select_next_precompute_stats(X_pairwise, gains,
+					self.precompute_stats, self.mask)
+				update_statistics_add(X_pairwise, self.precompute_stats, best_idx)
+			else:
+				raise KeyError("Precompute Stats does not work with sparse.")
+
+			self.ranking.append(best_idx)
+			self.gains.append(gains[best_idx])
+			self.mask[best_idx] = 1
+
+			if self.verbose == True:
+				self.pbar.update(1)
+
+		return gains
+
+	def _lazy_greedy_select_precompute_stats(self, X_pairwise):
+		"""Select elements from a dense matrix in a lazy greedy manner."""
+
+		for i in range(self.n_greedy_samples, self.n_samples):
+			best_gain = 0.
+			best_idx = None
+
+			while True:
+				prev_gain, idx = self.pq.pop()
+				prev_gain = -prev_gain
+
+				if best_gain >= prev_gain:
+					self.pq.add(idx, -prev_gain)
+					self.pq.remove(best_idx)
+					update_statistics_add(X_pairwise, self.precompute_stats, idx)
+					break
+
+				if not self.sparse:
+					a = numpy.maximum(self.precompute_stats[:X_pairwise.shape[0]], X_pairwise[idx])
+					gain = (a - self.precompute_stats[:X_pairwise.shape[0]]).sum()
+				else:
+					raise KeyError("Precompute Stats does not work with sparse.")
+
+				self.pq.add(idx, -gain)
+
+				if gain > best_gain:
+					best_gain = gain
+					best_idx = idx
+
+			self.ranking.append(best_idx)
+			self.gains.append(best_gain)
+			self.mask[best_idx] = True
+
+			if self.verbose == True:
+				self.pbar.update(1)
