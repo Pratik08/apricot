@@ -54,14 +54,17 @@ def update_statistics_add(X, precompute_stats, item_idx):
 		elif (X[idx][item_idx] > precompute_stats[X.shape[0] + idx]):
 			precompute_stats[X.shape[0] + idx] = X[idx][item_idx]
 
+def compute_gain_precompute(X, precompute_stats, idx):
+	a = numpy.maximum(precompute_stats[:X.shape[0]], X[idx])
+	gains = (a - precompute_stats[:X.shape[0]]).sum()
+	return gains
+
 # @njit(dtypes, nogil=True, parallel=True)
 def select_next_precompute_stats(X, gains, precompute_stats, mask):
 	for idx in range(X.shape[0]):
 		if mask[idx] == 1:
 			continue
-
-		a = numpy.maximum(precompute_stats[:X.shape[0]], X[idx])
-		gains[idx] = (a - precompute_stats[:X.shape[0]]).sum()
+		gains[idx] = compute_gain_precompute(X, precompute_stats, idx)
 	return numpy.argmax(gains)
 
 
@@ -339,35 +342,22 @@ class FacilityLocationSelection(SubmodularSelection):
 	def _lazy_greedy_select_precompute_stats(self, X_pairwise):
 		"""Select elements from a dense matrix in a lazy greedy manner."""
 
-		for i in range(self.n_greedy_samples, self.n_samples):
-			best_gain = 0.
-			best_idx = None
+		preV = 0.
 
-			while True:
-				prev_gain, idx = self.pq.pop()
-				prev_gain = -prev_gain
+		while(len(self.ranking) < self.n_samples):
+			_, idx = self.pq.pop()
 
-				if best_gain >= prev_gain:
-					self.pq.add(idx, -prev_gain)
-					self.pq.remove(best_idx)
-					update_statistics_add(X_pairwise, self.precompute_stats, idx)
-					break
+			maxV = preV + compute_gain_precompute(X_pairwise, self.precompute_stats, idx)
+			newV = maxV - preV
 
-				if not self.sparse:
-					a = numpy.maximum(self.precompute_stats[:X_pairwise.shape[0]], X_pairwise[idx])
-					gain = (a - self.precompute_stats[:X_pairwise.shape[0]]).sum()
-				else:
-					raise KeyError("Precompute Stats does not work with sparse.")
-
-				self.pq.add(idx, -gain)
-
-				if gain > best_gain:
-					best_gain = gain
-					best_idx = idx
-
-			self.ranking.append(best_idx)
-			self.gains.append(best_gain)
-			self.mask[best_idx] = True
+			if (newV < -self.pq.pq[0][0]):
+				self.pq.add(idx, -newV)
+			else:
+				self.ranking.append(idx)
+				self.gains.append(newV)
+				self.mask[idx] = 1
+				preV = maxV
+				update_statistics_add(X_pairwise, self.precompute_stats, idx)
 
 			if self.verbose == True:
 				self.pbar.update(1)
