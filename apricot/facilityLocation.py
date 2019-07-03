@@ -16,8 +16,11 @@ from numba import prange
 
 from scipy.sparse import csr_matrix
 
+import time
+
 dtypes = 'int64(float64[:,:], float64[:], float64[:], int8[:])'
 sdtypes = 'int64(float64[:], int32[:], int32[:], float64[:], float64[:], int8[:])'
+kdtypes = 'int64(float64[:,:], float64[:], float64[:], float64[:], int8[:])'
 
 @njit(dtypes, nogil=True, parallel=True)
 def select_next(X, gains, current_values, mask):
@@ -46,22 +49,34 @@ def select_next_sparse(X_data, X_indices, X_indptr, gains, current_values, mask)
 
 	return numpy.argmax(gains)
 
+@njit(nogil=True, parallel=True)
+def select_next_knapsack(X, gains, current_values, cost_values, mask):
+	for idx in prange(X.shape[0]):
+		if mask[idx] == 1:
+			continue
+
+		a = numpy.maximum(numpy.divide(X[idx], cost_values), current_values)
+		gains[idx] = (a - current_values).sum()
+	return numpy.argmax(gains)
+
+@njit('void(float64[:,:], float64[:], int32)', nogil=True, parallel=True)
 def update_statistics_add(X, precompute_stats, item_idx):
-	for idx in range(X.shape[0]):
+	for idx in prange(X.shape[0]):
 		if (X[idx][item_idx] > precompute_stats[idx]):
 			precompute_stats[X.shape[0] + idx] = precompute_stats[idx]
 			precompute_stats[idx] = X[idx][item_idx]
 		elif (X[idx][item_idx] > precompute_stats[X.shape[0] + idx]):
 			precompute_stats[X.shape[0] + idx] = X[idx][item_idx]
 
+@njit('float64(float64[:,:], float64[:], int32)', nogil=True, parallel=True)
 def compute_gain_precompute(X, precompute_stats, idx):
 	a = numpy.maximum(precompute_stats[:X.shape[0]], X[idx])
 	gains = (a - precompute_stats[:X.shape[0]]).sum()
 	return gains
 
-# @njit(dtypes, nogil=True, parallel=True)
+@njit(dtypes, nogil=True, parallel=True)
 def select_next_precompute_stats(X, gains, precompute_stats, mask):
-	for idx in range(X.shape[0]):
+	for idx in prange(X.shape[0]):
 		if mask[idx] == 1:
 			continue
 		gains[idx] = compute_gain_precompute(X, precompute_stats, idx)
@@ -137,9 +152,18 @@ class FacilityLocationSelection(SubmodularSelection):
 	"""
 
 	def __init__(self, n_samples=10, pairwise_func='euclidean', n_greedy_samples=1,
-		initial_subset=None, verbose=False):
+		budget=None, cost_values=None, initial_subset=None, verbose=False):
 		self.pairwise_func_name = pairwise_func
 		self.precompute_stats = numpy.zeros(n_samples * 2, dtype='float64')
+		self.budget = budget
+		self.cost_values = cost_values
+		self.current_cost = 0.
+
+		if ((not (self.cost_values is None)) and (self.budget is None)):
+			raise ValueError("Budget needs to be assigned when cost_values is not None.")
+
+		if (self.budget is None):
+			self.budget = n_samples
 
 		norm = lambda x: numpy.sqrt((x*x).sum(axis=1)).reshape(x.shape[0], 1)
 		norm2 = lambda x: (x*x).sum(axis=1).reshape(x.shape[0], 1)
@@ -188,6 +212,11 @@ class FacilityLocationSelection(SubmodularSelection):
 
 		f = self.pairwise_func
 		self.precompute_stats = numpy.zeros(X.shape[0] * 2, dtype='float64')
+
+		if (self.budget and (self.cost_values is None)):
+			self.cost_values = numpy.ones(X.shape[0], dtype='float64')
+		elif (self.budget and (not (self.cost_values is None)) and len(self.cost_values) != X.shape[0]):
+			raise ValueError("Invalid cost_values. A cost needs to be associated with every element of the ground set.")
 
 		if isinstance(X, csr_matrix) and f != "precomputed":
 			raise ValueError("Must passed in a precomputed sparse " \
@@ -317,16 +346,90 @@ class FacilityLocationSelection(SubmodularSelection):
 			if self.verbose == True:
 				self.pbar.update(1)
 
+	def _greedy_select_knapsack(self, X_pairwise):
+
+		self.current_values = numpy.divide(self.current_values, self.cost_values)
+
+		for i in range(self.n_greedy_samples):
+			gains = numpy.zeros(X_pairwise.shape[0], dtype='float64')
+
+			if not self.sparse:
+				best_idx = select_next_knapsack(X_pairwise, gains,
+					self.current_values, self.cost_values, self.mask)
+			else:
+				raise KeyError("Sparse selection not implemented in _greedy_select_knapsack yet.")
+
+			if (self.current_cost + self.cost_values[best_idx] <= self.budget):
+				self.ranking.append(best_idx)
+				self.gains.append(gains[best_idx])
+				self.mask[best_idx] = 1
+				self.current_values = numpy.maximum(numpy.divide(X_pairwise[best_idx],
+					self.cost_values), self.current_values)
+				self.current_cost += self.cost_values[best_idx]
+			else:
+				# might need to be changed. Updated gain is being returned.
+				# Need to return gain of previous iteration.
+				return gains
+
+			if self.verbose == True:
+				self.pbar.update(1)
+
+		return gains
+
+	def _lazy_greedy_select_knapsack(self, X_pairwise):
+		for i in range(self.n_greedy_samples, self.n_samples):
+			best_gain = 0.
+			best_idx = None
+
+			while True:
+				prev_gain, idx = self.pq.pop()
+				prev_gain = -prev_gain
+
+				if best_gain >= prev_gain:
+					self.pq.add(idx, -prev_gain)
+					self.pq.remove(best_idx)
+					break
+
+				if not self.sparse:
+					a = numpy.maximum(numpy.divide(X_pairwise[:, idx], self.cost_values),
+						self.current_values)
+
+					gain = (a - self.current_values).sum()
+				else:
+					raise KeyError("Sparse selection not implemented in _lazy_greedy_select_knapsack yet.")
+
+				self.pq.add(idx, -gain)
+
+				if gain > best_gain:
+					best_gain = gain
+					best_idx = idx
+
+			if (self.current_cost + self.cost_values[best_idx] <= self.budget):
+				self.ranking.append(best_idx)
+				self.gains.append(best_gain)
+				self.mask[best_idx] = True
+				self.current_cost += self.cost_values[best_idx]
+
+				if not self.sparse:
+					self.current_values = numpy.maximum(numpy.divide(X_pairwise[best_idx], self.cost_values),
+						self.current_values)
+				else:
+					raise KeyError("Sparse selection not implemented in _lazy_greedy_select_knapsack yet.")
+			else:
+				break
+
+			if self.verbose == True:
+				self.pbar.update(1)
+
 	def _greedy_select_precompute_stats(self, X_pairwise):
 		"""Select elements in a naive greedy manner."""
-
+		# start_time = time.time()
 		for i in range(self.n_greedy_samples):
 			gains = numpy.zeros(X_pairwise.shape[0], dtype='float64')
 
 			if not self.sparse:
 				best_idx = select_next_precompute_stats(X_pairwise, gains,
 					self.precompute_stats, self.mask)
-				update_statistics_add(X_pairwise, self.precompute_stats, best_idx)
 			else:
 				raise KeyError("Precompute Stats does not work with sparse.")
 
@@ -334,30 +437,49 @@ class FacilityLocationSelection(SubmodularSelection):
 			self.gains.append(gains[best_idx])
 			self.mask[best_idx] = 1
 
+			# start_time_2 = time.time()
+
+			update_statistics_add(X_pairwise, self.precompute_stats, best_idx)
+			# end_time_2 = time.time()
+			# temp = end_time_2 - start_time_2
+
 			if self.verbose == True:
 				self.pbar.update(1)
+
+		# end_time = time.time()
+		# print("Pratik Greedy Select: ", str(end_time - start_time))
+		# print("Pratik Greedy Select Update Stats: ", str(temp))
+		# print("Pratik Greedy w/o Update Stats: ", str(end_time - start_time - temp))
 
 		return gains
 
 	def _lazy_greedy_select_precompute_stats(self, X_pairwise):
 		"""Select elements from a dense matrix in a lazy greedy manner."""
+		for i in range(self.n_greedy_samples, self.n_samples):
+			best_gain = 0.
+			best_idx = None
 
-		preV = 0.
+			while True:
+				prev_gain, idx = self.pq.pop()
+				prev_gain = -prev_gain
 
-		while(len(self.ranking) < self.n_samples):
-			_, idx = self.pq.pop()
+				if best_gain >= prev_gain:
+					self.pq.add(idx, -prev_gain)
+					self.pq.remove(best_idx)
+					break
 
-			maxV = preV + compute_gain_precompute(X_pairwise, self.precompute_stats, idx)
-			newV = maxV - preV
+				gain = compute_gain_precompute(X_pairwise, self.precompute_stats, idx)
 
-			if (newV < -self.pq.pq[0][0]):
-				self.pq.add(idx, -newV)
-			else:
-				self.ranking.append(idx)
-				self.gains.append(newV)
-				self.mask[idx] = 1
-				preV = maxV
-				update_statistics_add(X_pairwise, self.precompute_stats, idx)
+				self.pq.add(idx, -gain)
+
+				if gain > best_gain:
+					best_gain = gain
+					best_idx = idx
+
+			self.ranking.append(best_idx)
+			self.gains.append(best_gain)
+			self.mask[best_idx] = True
+			update_statistics_add(X_pairwise, self.precompute_stats, best_idx)
 
 			if self.verbose == True:
 				self.pbar.update(1)

@@ -40,7 +40,7 @@ class PriorityQueue(object):
     def __init__(self):
         self.pq = []
         self.lookup = {}
-    
+
     def add(self, item, weight):
         """Add an element to the priority queue. Runtime is O(log n).
 
@@ -64,22 +64,20 @@ class PriorityQueue(object):
         None
         """
 
-
-
         if item in self.lookup:
             self.remove(item)
-        
+
         entry = [weight, item]
         self.lookup[item] = entry
         heappush(self.pq, entry)
-    
+
     def remove(self, item):
         """Remove an element from the queue.
 
         This is not popping the highest priority item, rather it will remove
         an element that is present in the queue. If one attempts to remove an
         item that is not present in the queue the function will error.
-        
+
         Parameters
         ----------
         item : object
@@ -90,10 +88,9 @@ class PriorityQueue(object):
         None
         """
 
-
         entry = self.lookup.pop(item)
         entry[-1] = "DELETED"
-    
+
     def pop(self):
         """Pop the highest priority element from the queue. Runtime is O(log n).
 
@@ -118,5 +115,5 @@ class PriorityQueue(object):
             if item != "DELETED":
                 del self.lookup[item]
                 return weight, item
-        
+
         raise KeyError("No elements left in the priority queue.")

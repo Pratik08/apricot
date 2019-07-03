@@ -171,6 +171,7 @@ class SubmodularSelection(object):
 		# the last round of selection.
 		gains = self._greedy_select(X)
 		# gains = self._greedy_select_precompute_stats(X)
+		# gains = self._greedy_select_knapsack(X)
 
 		# Populate the priority queue following greedy selection
 		if self.n_greedy_samples < self.n_samples:
@@ -181,6 +182,7 @@ class SubmodularSelection(object):
 			# Now select remaining elements using the lazy greedy algorithm.
 			self._lazy_greedy_select(X)
 			# self._lazy_greedy_select_precompute_stats(X)
+			# self._lazy_greedy_select_knapsack(X)
 
 		if self.verbose == True:
 			self.pbar.close()
